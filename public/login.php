@@ -1,44 +1,85 @@
 <?php
-// public/login.php
 session_start();
-if (!empty($_SESSION['user_id'])) {
-    header("Location: /capstone_website/public/index.php");
-    exit();
-}
-
-require_once __DIR__ . '/../helpers/auth.php';
+require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../helpers/csrf.php';
 
+// If already logged in, bounce to dashboard (change to your overview page)
+if (!empty($_SESSION['user_id'])) {
+  header("Location: /capstone_website_draft/public/index.php");
+  exit;
+}
+
 $error = '';
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!csrf_check($_POST['csrf_token'] ?? null)) {
-        $error = "Invalid request. Please try again.";
+  csrf_verify(); // 🔒 must be first on POST
+
+  $username = trim($_POST['username'] ?? '');
+  $password = $_POST['password'] ?? '';
+
+  if ($username === '' || $password === '') {
+    $error = 'Please enter username and password.';
+  } else {
+    $stmt = db()->prepare("SELECT id, username, password, role, is_active FROM users WHERE username = ?");
+    $stmt->bind_param("s", $username);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $user = $res->fetch_assoc();
+
+    if (!$user) {
+      $error = 'Invalid credentials.';
+    } elseif ((int)$user['is_active'] !== 1) {
+      $error = 'Your account is inactive.';
+    } elseif (!password_verify($password, $user['password'])) {
+      $error = 'Invalid credentials.';
     } else {
-        [$ok, $msg] = auth_login(trim($_POST['username'] ?? ''), $_POST['password'] ?? '');
-        if ($ok) {
-            require_once __DIR__ . '/../helpers/auth.php';
-            redirect_by_role();
-        }
-        $error = $msg ?: "Login failed.";
+      // ✅ success
+      session_regenerate_id(true); // 🔒 prevent session fixation
+      $_SESSION['user_id']  = (int)$user['id'];
+      $_SESSION['username'] = $user['username'];
+      $_SESSION['role']     = $user['role'];
+
+      // Optional: track last login
+      // db()->query("UPDATE users SET last_login = NOW() WHERE id=".(int)$user['id']);
+
+      // redirect per role (customize destinations)
+      if ($user['role'] === 'admin') {
+        header("Location: /capstone_website_draft/public/index.php");
+      } else {
+        header("Location: /capstone_website_draft/public/index.php");
+      }
+      exit;
     }
+  }
 }
 ?>
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <title>Login</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f7f7f7;
-            display: grid;
-            place-items: center;
-            height: 100vh;
-        }
-
-        .card {
+  <meta charset="UTF-8"><title>Login</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>/* keep your existing styles; minimal here */ body{font-family:Arial;padding:20px;} .box{max-width:400px;margin:40px auto;padding:20px;border-radius:12px;background:#fff;color:#333} .field{margin:10px 0} .error{color:#b00020;margin:8px 0}</style>
+</head>
+<body>
+  <div class="box">
+    <h2>Sign in</h2>
+    <?php if ($error): ?><div class="error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
+    <form method="post">
+      <?= csrf_field() ?>
+      <div class="field">
+        <label>Username</label><br>
+        <input type="text" name="username" required autofocus>
+      </div>
+      <div class="field">
+        <label>Password</label><br>
+        <input type="password" name="password" required>
+      </div>
+      <button type="submit">Login</button>
+    </form>
+  </div>
+</body>
+</html>
+.card {
             width: 340px;
             background: #fff;
             padding: 22px;
@@ -111,5 +152,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <p class="muted">No account? <a href="/capstone_website/public/register.php">Create one</a></p>
     </div>
 </body>
+
 
 </html>
