@@ -16,4 +16,3 @@ function csrf_field(): string {
 function csrf_check(?string $token): bool {
   return $token && isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
 }
-?>
