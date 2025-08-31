@@ -1,0 +1,13 @@
+# Send everything through /public without duplicating files
+RewriteEngine On
+
+# When visiting the project root, show /public/
+RewriteRule ^$ public/ [L]
+
+# If the requested path matches a real file/dir in the project root, serve it
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Otherwise, rewrite requests into /public
+RewriteRule ^(.+)$ public/$1 [L]
