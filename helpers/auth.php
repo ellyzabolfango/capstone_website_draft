@@ -2,15 +2,7 @@
 // helpers/auth.php
 if (session_status() !== PHP_SESSION_ACTIVE) session_start();
 
-require_once __DIR__ . '/../config/db.php';   // provides db()
-require_once __DIR__ . '/csrf.php';           // optional here, but handy if you add CSRF to login later
-
-// Adjust these to match your actual folder names once:
-const BASE_URL   = '/capstone_website_draft';     // <<< change if your folder is different
-const PUBLIC_URL = BASE_URL . '/public';
-const ADMIN_DASH = BASE_URL . '/views/admin/dashboard.php'; // or /public/index.php if that’s your entry
-const USER_DASH  = BASE_URL . '/views/user/dashboard.php';  // same note as above
-const LOGIN_URL  = PUBLIC_URL . '/login.php';
+require_once __DIR__ . '/../bootstrap.php';   // loads DB, CSRF, auth, constants
 
 function auth_login(string $username, string $password): array {
   $stmt = db()->prepare("SELECT id, username, password, role, is_active FROM users WHERE username = ?");

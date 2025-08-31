@@ -1,9 +1,7 @@
 <?php
 // /public/update_proposal_status.php
 session_start();
-require_once __DIR__ . '/../helpers/auth.php';
-require_once __DIR__ . '/../helpers/csrf.php';
-require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../bootstrap.php'; 
 
 auth_required();
 if (!is_admin()) { http_response_code(403); exit('Forbidden'); }

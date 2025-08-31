@@ -1,10 +1,14 @@
 <?php
 // /views/admin/user_management.php
 session_start();
-require_once __DIR__ . '/../../helpers/auth.php';
-require_once __DIR__ . '/../../config/db.php';
+
+require_once dirname(__DIR__, 2) . '/bootstrap.php'; // loads DB, CSRF, AUTH, constants
+
 auth_required();
-//if (!is_admin()) { header("Location: ../index.php"); exit(); } // admin-only
+if (!is_admin()) {
+  header("Location: " . PUBLIC_URL . "/index.php");
+  exit();
+}
 
 // --- handle actions (activate/deactivate) ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

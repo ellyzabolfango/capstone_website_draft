@@ -1,10 +1,14 @@
 <?php
 // /views/admin/reports.php
 session_start();
-require_once __DIR__ . '/../../helpers/auth.php';
-require_once __DIR__ . '/../../config/db.php';
+
+require_once dirname(__DIR__, 2) . '/bootstrap.php'; // loads DB, CSRF, AUTH, constants
+
 auth_required();
-if (!is_admin()) { header("Location: ../index.php"); exit(); }
+if (!is_admin()) {
+  header("Location: " . PUBLIC_URL . "/index.php");
+  exit();
+}
 
 // ----- inputs -----
 $q = trim($_GET['q'] ?? '');

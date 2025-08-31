@@ -3,17 +3,20 @@
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
 $host = "localhost";
-$db   = "sk_capstone_db"; 
+$db = "sk_capstone_db";
 $user = "root";
 $pass = "";
 
 // Admin seed (via PHP hash)
 $ADMIN_USERNAME = "admin";
-$ADMIN_EMAIL    = "admin@example.com";
+$ADMIN_EMAIL = "admin@example.com";
 $ADMIN_FULLNAME = "Administrator";
 $ADMIN_PASSWORD = "Admin123"; // will be hashed
 
-function line($msg){ echo $msg."<br>\n"; }
+function line($msg)
+{
+  echo $msg . "<br>\n";
+}
 
 try {
   // 1) Ensure DB exists and select it
@@ -25,8 +28,12 @@ try {
 
   // 2) Disable FK checks during migration (restore in finally)
   $fkDisabled = false;
-  try { $conn->query("SET FOREIGN_KEY_CHECKS=0"); $fkDisabled = true; }
-  catch(Throwable $e){ line("⚠️ Could not disable FOREIGN_KEY_CHECKS: ".htmlspecialchars($e->getMessage())); }
+  try {
+    $conn->query("SET FOREIGN_KEY_CHECKS=0");
+    $fkDisabled = true;
+  } catch (Throwable $e) {
+    line("⚠️ Could not disable FOREIGN_KEY_CHECKS: " . htmlspecialchars($e->getMessage()));
+  }
 
   // 3) Run all .sql files (sorted)
   $ran = 0;
@@ -36,13 +43,17 @@ try {
     sort($files, SORT_NATURAL);
     foreach ($files as $f) {
       $path = $migDir . DIRECTORY_SEPARATOR . $f;
-      $sql  = @file_get_contents($path);
-      if (!$sql || !trim($sql)) { line("→ $f skipped (empty)"); continue; }
+      $sql = @file_get_contents($path);
+      if (!$sql || !trim($sql)) {
+        line("→ $f skipped (empty)");
+        continue;
+      }
 
       echo "→ Running $f ... ";
       try {
         if ($conn->multi_query($sql)) {
-          while ($conn->more_results() && $conn->next_result()) { /* flush */ }
+          while ($conn->more_results() && $conn->next_result()) { /* flush */
+          }
           echo "✅<br>";
           $ran++;
         } else {
@@ -62,10 +73,12 @@ try {
     // 001_create_users.sql (unchanged)
     'users' => <<<SQL
 CREATE TABLE IF NOT EXISTS users (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(50) NOT NULL UNIQUE,
-  fullname VARCHAR(100) NOT NULL DEFAULT '',
+  fullname VARCHAR(100) NOT NULL,
   email VARCHAR(100) NOT NULL UNIQUE,
+  location VARCHAR(100) NOT NULL,
+  position VARCHAR(100) NOT NULL,
   role ENUM('admin','user') NOT NULL DEFAULT 'user',
   password VARCHAR(255) NOT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
@@ -210,7 +223,7 @@ SQL,
   try {
     if ($conn->query("SHOW TABLES LIKE 'settings'")->num_rows) {
       $row = $conn->query("SELECT COUNT(*) c FROM settings")->fetch_assoc();
-      if ((int)$row['c'] === 0) {
+      if ((int) $row['c'] === 0) {
         $conn->query("INSERT INTO settings (id, total_budget, fiscal_year) VALUES (1, 0.00, YEAR(CURDATE()))");
         line("⚙️ Seeded settings (total_budget=0.00)");
       } else {
@@ -224,7 +237,10 @@ SQL,
   }
 
 } finally {
-  try { $conn?->query("SET FOREIGN_KEY_CHECKS=1"); } catch (Throwable $e) { /* noop */ }
+  try {
+    $conn?->query("SET FOREIGN_KEY_CHECKS=1");
+  } catch (Throwable $e) { /* noop */
+  }
   $conn?->close();
 }
 
