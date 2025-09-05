@@ -1,159 +1,184 @@
 <?php
-session_start();
-if (!isset($_SESSION['username'])) {
-    header("Location: ../login.php");
-    exit();
-}
-require_once __DIR__ . '/../../config/db.php';
+/**
+ * /views/user/reports.php
+ * User: list and export YOUR proposals as “Reports”.
+ * - Source = proposals (+ users for barangay & prepared-by label)
+ * - Filters only rows where created_by = current user
+ * - Search by title/category/status/creator name/barangay
+ * - CSV download of the current filtered view
+ */
+declare(strict_types=1);
 
-function peso($n){ return '₱' . number_format((float)$n, 0); }
+if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+require_once dirname(__DIR__, 2) . '/bootstrap.php';
 
-// --- inputs ---
-$q       = trim($_GET['q'] ?? '');
-$export  = isset($_GET['export']) && $_GET['export'] === 'csv';
+auth_required();
 
-// --- user location (to filter) ---
-$userId  = (int)($_SESSION['user_id'] ?? 0);
-$stmtU   = $conn->prepare("SELECT COALESCE(location,'') AS loc, COALESCE(fullname, username, '') AS name FROM users WHERE id=?");
-$stmtU->bind_param('i', $userId);
-$stmtU->execute();
-$urow    = $stmtU->get_result()->fetch_assoc() ?: [];
-$userLoc = $urow['loc'] ?? '';
+// ---------- Current user ----------
+$userId   = (int)($_SESSION['user_id'] ?? 0);
+$username = (string)($_SESSION['username'] ?? 'User');
+if ($userId <= 0) { header('Location: ' . LOGIN_URL); exit(); }
 
-// --- detect if a dedicated 'reports' table exists ---
-$hasReportsTbl = $conn->query("SHOW TABLES LIKE 'reports'")->num_rows > 0;
+// ---------- Inputs ----------
+$q      = trim((string)($_GET['q'] ?? ''));
+$params = [$userId];
+$types  = 'i';
+$where  = "WHERE p.created_by = ?"; // only this user's proposals
 
-// --- build query (same-location only) ---
-$params = [];
-$types  = '';
-
-if ($hasReportsTbl) {
-  // Prefer dedicated reports table if present
-  $sql = "SELECT
-            r.id,
-            r.title,
-            COALESCE(r.type, '') AS type,
-            COALESCE(r.barangay, r.location, r.source, '') AS barangay,
-            COALESCE(r.status, '') AS status,
-            COALESCE(r.prepared_by, '') AS prepared_by,
-            COALESCE(r.budget, 0) AS budget,
-            COALESCE(r.date, r.created_at, r.updated_at, NOW()) AS dt
-          FROM reports r
-          WHERE COALESCE(r.barangay, r.location, r.source, '') = ?";
-  $params[] = $userLoc; $types .= 's';
-  if ($q !== '') {
-    $sql .= " AND (r.title LIKE ? OR r.type LIKE ? OR r.status LIKE ? OR r.prepared_by LIKE ?)";
-    $like = "%{$q}%"; $params[]=$like; $params[]=$like; $params[]=$like; $params[]=$like; $types.='ssss';
-  }
-  $sql .= " ORDER BY dt DESC, r.id DESC";
-} else {
-  // Fallback: derive "reports" from proposals (e.g., completed ones)
-  $sql = "SELECT
-            p.id,
-            p.title,
-            COALESCE(p.type,'') AS type,
-            COALESCE(p.barangay, p.location, p.source, '') AS barangay,
-            COALESCE(p.status,'') AS status,
-            COALESCE(u.fullname, u.username, CONCAT('User #', p.submitted_by)) AS prepared_by,
-            COALESCE(p.budget, 0) AS budget,
-            COALESCE(p.implementation_completion_date, p.submitted_at, p.created_at, NOW()) AS dt
-          FROM proposals p
-          LEFT JOIN users u ON u.id = p.submitted_by
-          WHERE COALESCE(p.barangay, p.location, p.source, '') = ?";
-  $params[] = $userLoc; $types .= 's';
-  // If you only want completed items here, uncomment the next line:
-  // $sql .= " AND UPPER(COALESCE(p.status,'')) = 'COMPLETED'";
-  if ($q !== '') {
-    $sql .= " AND (p.title LIKE ? OR p.type LIKE ? OR p.status LIKE ? OR COALESCE(u.fullname, u.username, '') LIKE ?)";
-    $like = "%{$q}%"; $params[]=$like; $params[]=$like; $params[]=$like; $params[]=$like; $types.='ssss';
-  }
-  $sql .= " ORDER BY dt DESC, p.id DESC";
+if ($q !== '') {
+  // Search title, category (type), status, prepared_by (fullname/username), barangay
+  $where .= "
+    AND (
+         p.title LIKE ?
+      OR COALESCE(p.category,'') LIKE ?
+      OR COALESCE(p.status,'') LIKE ?
+      OR COALESCE(u.fullname,u.username,'') LIKE ?
+      OR COALESCE(u.barangay,'') LIKE ?
+    )
+  ";
+  $like   = "%{$q}%";
+  array_push($params, $like, $like, $like, $like, $like);
+  $types .= 'sssss';
 }
 
-$stmt = $conn->prepare($sql);
-if ($params) $stmt->bind_param($types, ...$params);
-$stmt->execute();
-$rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+// ---------- Query ----------
+$sqlBase = "
+  SELECT
+    p.id,
+    p.title,
+    COALESCE(p.category,'')       AS type,       -- Program/Project/Activity
+    COALESCE(u.barangay,'—')      AS barangay,   -- user’s barangay
+    COALESCE(p.status,'Pending')  AS status,
+    TRIM(CONCAT(
+      COALESCE(u.fullname, COALESCE(u.username, '')),
+      CASE WHEN COALESCE(u.position,'') <> '' THEN CONCAT(' (', u.position, ')') ELSE '' END
+    ))                             AS prepared_by,
+    COALESCE(p.budget,0)          AS budget,
+    p.submitted_at                AS created_at
+  FROM proposals p
+  LEFT JOIN users u ON u.id = p.created_by
+  $where
+  ORDER BY p.submitted_at DESC, p.id DESC
+";
 
-// --- CSV export (keeps same filters) ---
-if ($export) {
+// ---------- CSV download ----------
+if (isset($_GET['download'])) {
+  $stmt = db()->prepare($sqlBase);
+  if ($types) $stmt->bind_param($types, ...$params);
+  $stmt->execute();
+  $res = $stmt->get_result();
+
   header('Content-Type: text/csv; charset=utf-8');
-  header('Content-Disposition: attachment; filename=reports_' . date('Ymd_His') . '.csv');
+  header('Content-Disposition: attachment; filename=my_reports_'.date('Ymd_His').'.csv');
+
   $out = fopen('php://output', 'w');
   fputcsv($out, ['#','Title','Type','Barangay','Status','Prepared by','Budgetary Requirement','Date']);
-  $i=1;
-  foreach ($rows as $r) {
+
+  $i = 1;
+  while ($row = $res->fetch_assoc()) {
     fputcsv($out, [
       $i++,
-      $r['title'],
-      $r['type'],
-      $r['barangay'],
-      $r['status'],
-      $r['prepared_by'],
-      (string) $r['budget'],
-      $r['dt'] ? date('F j, Y', strtotime($r['dt'])) : ''
+      (string)$row['title'],
+      (string)$row['type'],
+      (string)$row['barangay'],
+      (string)$row['status'],
+      (string)$row['prepared_by'],
+      number_format((float)$row['budget'], 2, '.', ''), // numeric in CSV
+      !empty($row['created_at']) ? date('F j, Y', strtotime((string)$row['created_at'])) : '',
     ]);
   }
   fclose($out);
-  exit;
+  exit();
 }
 
-// static for now (you can compute this like on other pages)
-$fundRemaining = "40,000";
+// ---------- Fetch rows for page ----------
+$stmt = db()->prepare($sqlBase);
+if ($types) $stmt->bind_param($types, ...$params);
+$stmt->execute();
+$rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Reports</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { display: flex; font-family: Arial, sans-serif; height: 100vh;
-      background: linear-gradient(to right, #4d2c3d, #3b4371, #00c6ff); color: #fff; }
-    .sidebar { width: 250px; background: #2e4b4f; padding: 20px 0; display:flex; flex-direction:column; align-items:center; position:relative; z-index:10; }
-    .sidebar img.logo { width: 120px; margin-bottom: 10px; }
-    .sidebar .label { font-size:13px; font-weight:bold; text-align:center; color:#dff2ff; text-shadow:1px 1px 2px #000; margin-bottom:25px; line-height:1.3; }
-    .sidebar a { color:#fff; text-decoration:none; padding:10px 15px; margin:6px 0; border-radius:8px; width:90%; display:flex; align-items:center; gap:10px; font-weight:bold; }
-    .sidebar a.active { background-color:#2ec8b5; color:#fff; }
-    .main { flex:1; padding:30px; overflow-y:auto; }
-    .top-bar { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:20px; }
-    .search-bar { background-color:rgba(255,255,255,0.2); border-radius:25px; padding:10px 20px; display:flex; align-items:center; gap:10px; width:350px; color:#fff; }
-    .search-bar input { background:transparent; border:none; color:#fff; outline:none; width:100%; }
-    .top-right { display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
-    .icon-group { display:flex; gap:15px; align-items:center; }
-    .bell-icon { font-size:24px; }
-    .user-icon { width:36px; height:36px; border-radius:50%; background:#fff; display:flex; align-items:center; justify-content:center; font-size:18px; color:#333; box-shadow:0 2px 5px rgba(0,0,0,0.3); }
-    .download-btn { background-color:rgba(255,255,255,0.15); padding:10px; border-radius:12px; cursor:pointer; font-size:20px; color:#fff; transition:background-color .3s; user-select:none; margin-top:20px; }
-    .download-btn:hover { background-color:#279fbb; }
-    table { width:100%; border-collapse:collapse; border-radius:12px; overflow:hidden; background-color:rgba(0,0,0,0.2); }
-    th, td { padding:14px 16px; text-align:left; color:#fff; }
-    th { font-weight:bold; }
-    tr:nth-child(even) td { background-color:rgba(255,255,255,0.1); }
+    body {
+      display: flex; font-family: Arial, sans-serif; height: 100vh;
+      background: linear-gradient(to right, #4d2c3d, #3b4371, #00c6ff); color: #fff;
+    }
+
+    /* Sidebar (user) */
+    .sidebar { width: 270px; background: linear-gradient(to bottom, #2e4f4f, #33676b); padding: 20px; display:flex; flex-direction:column; gap:20px; }
+    .sidebar img.logo { width: 110px; align-self:center; }
+    .nav-item { font-weight:bold; display:flex; align-items:center; gap:10px; padding:10px 15px; border-radius:8px; text-decoration:none; color:#fff; }
+    .nav-item:hover, .nav-item.active { background: rgba(255,255,255,0.15); }
+    .sub-links { margin-left:30px; display:flex; flex-direction:column; gap:4px; }
+    .sub-links a { font-weight:bold; color:#fff; font-size:14px; text-decoration:none; padding:4px 0; }
+    .sub-links a:hover { text-decoration: underline; }
+
+    .main { flex: 1; padding: 30px; overflow-y: auto; }
+    .top-bar { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+    .search-bar { background: rgba(255,255,255,0.2); border-radius: 25px; padding: 10px 20px; display: flex; align-items: center; gap: 10px; width: 420px; color: #fff; }
+    .search-bar input { background: transparent; border: none; color: #fff; outline: none; width: 100%; }
+
+    .user-menu { position: relative; display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
+    .user-btn { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+    .user-icon { width: 36px; height: 36px; border-radius: 50%; background: #fff; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #333; box-shadow: 0 2px 5px rgba(0,0,0,0.3); }
+    .caret { font-size: 14px; opacity: .9; }
+    .menu { position: absolute; right: 0; top: 120%; background: #fff; color: #222; min-width: 200px; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.25); overflow: hidden; display: none; z-index: 100; }
+    .menu.show { display: block; }
+    .menu-header { padding: 12px 14px; font-weight: bold; background: #f2f5f8; }
+    .menu-item a { display: block; width: 100%; text-align: left; padding: 12px 14px; color: #222; text-decoration: none; }
+    .menu-item a:hover { background: #eef3f9; }
+
+    .download-btn { background-color: rgba(255, 255, 255, 0.15); padding: 10px; border-radius: 12px; cursor: pointer; font-size: 20px; color: white; transition: background-color 0.3s; user-select: none; margin-top: 20px; }
+    .download-btn:hover { background-color: #279fbb; }
+
+    table { width: 100%; border-collapse: collapse; border-radius: 12px; overflow: hidden; background-color: rgba(0, 0, 0, 0.2); }
+    th, td { padding: 14px 16px; text-align: left; color: #fff; }
+    th { font-weight: bold; }
+    tr:nth-child(even) td { background-color: rgba(255, 255, 255, 0.07); }
   </style>
 </head>
 <body>
   <div class="sidebar">
-    <img src="sklogo.png" alt="SK Logo" class="logo" />
-    <div class="label"></div>
-    <a href="admin_pov.php"> 📊 Dashboard</a>
-    <a href="proposals.php">📁 Proposals</a>
-    <a href="templates.php">📄 Document Templates</a>
-    <a href="reports.php" class="active">📑 Reports</a>
+    <img src="<?= htmlspecialchars(BASE_URL) ?>/assets/icons/sklogo.png" alt="SK Logo" class="logo" />
+    <a class="nav-item" href="<?= htmlspecialchars(USER_URL) ?>/dashboard.php">📊 Dashboard</a>
+
+    <div class="nav-item">🗂️ Proposals ▾</div>
+    <div class="sub-links">
+      <a href="<?= htmlspecialchars(USER_URL) ?>/programs.php">Programs</a>
+      <a href="<?= htmlspecialchars(USER_URL) ?>/projects.php">Project Proposal</a>
+      <a href="<?= htmlspecialchars(USER_URL) ?>/activities.php">Activities</a>
+      <a href="<?= htmlspecialchars(USER_URL) ?>/annualplan.php">Annual Budget</a>
+    </div>
+
+    <a class="nav-item" href="<?= htmlspecialchars(USER_URL) ?>/templates.php">📄 Document Templates</a>
+    <a class="nav-item active" href="<?= htmlspecialchars(USER_URL) ?>/reports.php">📑 Reports</a>
   </div>
 
   <div class="main">
     <div class="top-bar">
       <form class="search-bar" method="get" action="">
-        🔍 <input type="text" name="q" placeholder="Search..." value="<?= htmlspecialchars($q, ENT_QUOTES) ?>" />
+        🔍 <input id="q" type="text" name="q" placeholder="Search title, type, status, prepared by, barangay..." value="<?= htmlspecialchars($q) ?>" />
       </form>
-      <div class="top-right">
-        <div class="icon-group">
-          <div class="bell-icon">🔔</div>
-          <div class="user-icon">👤</div>
+
+      <div class="user-menu" id="userMenu">
+        <div style="display:flex; gap:15px; align-items:center;">
+          <div class="user-btn" id="userBtn" aria-haspopup="true" aria-expanded="false">
+            🔔
+            <div class="user-icon">👤</div>
+            <span class="caret">▾</span>
+          </div>
+          <div class="menu" id="menu">
+            <div class="menu-header">@<?= htmlspecialchars($username) ?></div>
+            <div class="menu-item"><a href="<?= htmlspecialchars(PUBLIC_URL) ?>/logout.php">Logout</a></div>
+          </div>
         </div>
-        <!-- Download keeps current search filter -->
-        <a class="download-btn" title="Download" href="?export=csv<?= $q!=='' ? '&q='.urlencode($q):'' ?>">⬇️</a>
+        <div class="download-btn" id="dlBtn" title="Download CSV">⬇️</div>
       </div>
     </div>
 
@@ -171,24 +196,64 @@ $fundRemaining = "40,000";
         </tr>
       </thead>
       <tbody>
-        <?php if (!$userLoc): ?>
-          <tr><td colspan="8">No location set on your account. Ask an admin to add your location to see reports.</td></tr>
-        <?php elseif (!$rows): ?>
-          <tr><td colspan="8">No reports found<?= $q? ' for “'.htmlspecialchars($q, ENT_QUOTES).'”':''; ?> in <?= htmlspecialchars($userLoc, ENT_QUOTES) ?>.</td></tr>
-        <?php else: $i=1; foreach ($rows as $r): ?>
-          <tr>
-            <td><?= $i++ ?>.</td>
-            <td><?= htmlspecialchars($r['title'] ?? '', ENT_QUOTES) ?></td>
-            <td><?= htmlspecialchars($r['type'] ?? '', ENT_QUOTES) ?></td>
-            <td><?= htmlspecialchars($r['barangay'] ?? '', ENT_QUOTES) ?></td>
-            <td><?= htmlspecialchars($r['status'] ?? '', ENT_QUOTES) ?></td>
-            <td><?= htmlspecialchars($r['prepared_by'] ?? '', ENT_QUOTES) ?></td>
-            <td><?= htmlspecialchars(peso($r['budget'] ?? 0), ENT_QUOTES) ?></td>
-            <td><?= !empty($r['dt']) ? htmlspecialchars(date('F j, Y', strtotime($r['dt'])), ENT_QUOTES) : '' ?></td>
-          </tr>
-        <?php endforeach; endif; ?>
+        <?php if (!$rows): ?>
+          <tr><td colspan="8" style="text-align:center; opacity:.9;">No reports found.</td></tr>
+        <?php else: ?>
+          <?php foreach ($rows as $i => $r): ?>
+            <tr>
+              <td><?= ($i + 1) . '.' ?></td>
+              <td><?= htmlspecialchars($r['title'] ?? '') ?></td>
+              <td><?= htmlspecialchars($r['type'] ?? '') ?></td>
+              <td><?= htmlspecialchars($r['barangay'] ?? '—') ?></td>
+              <td><?= htmlspecialchars($r['status'] ?? '') ?></td>
+              <td><?= htmlspecialchars($r['prepared_by'] ?? '') ?></td>
+              <td>₱<?= number_format((float)($r['budget'] ?? 0), 2) ?></td>
+              <td><?= !empty($r['created_at']) ? htmlspecialchars(date('F j, Y', strtotime((string)$r['created_at']))) : '' ?></td>
+            </tr>
+          <?php endforeach; ?>
+        <?php endif; ?>
       </tbody>
     </table>
   </div>
+
+  <script>
+    // Download current view as CSV
+    (function () {
+      const dlBtn = document.getElementById('dlBtn');
+      const q     = document.getElementById('q');
+      if (!dlBtn) return;
+      dlBtn.addEventListener('click', () => {
+        const qs = new URLSearchParams(window.location.search);
+        if (q && q.value) qs.set('q', q.value);
+        qs.set('download', '1');
+        window.location = 'reports.php?' + qs.toString();
+      });
+    })();
+
+    // User dropdown
+    (function () {
+      const btn = document.getElementById('userBtn');
+      const menu = document.getElementById('menu');
+      if (!btn || !menu) return;
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        const open = menu.classList.toggle('show');
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      document.addEventListener('click', function (e) {
+        if (!menu.classList.contains('show')) return;
+        if (!menu.contains(e.target) && !btn.contains(e.target)) {
+          menu.classList.remove('show');
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && menu.classList.contains('show')) {
+          menu.classList.remove('show');
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

@@ -1,59 +1,85 @@
 <?php
-session_start();
-if (!isset($_SESSION['username'])) {
-    header("Location: ../login.php");
-    exit();
-}
-require_once __DIR__ . '/../../config/db.php';
+/**
+ * /views/user/templates.php
+ * User view for document templates (read-only).
+ *
+ * Uses the same `templates` table as the admin page:
+ *   templates(id, name, file_path, uploaded_by, uploaded_at)
+ *
+ * Searchable fields: name, file_path
+ * Links open/download the stored relative file (served from /public/.. path).
+ */
 
+declare(strict_types=1);
+
+if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+require_once dirname(__DIR__, 2) . '/bootstrap.php';
+
+
+// ------------------------------------------------------------------
+// Inputs
+// ------------------------------------------------------------------
 $q = trim($_GET['q'] ?? '');
 
-// Fetch templates
-$where = '';
+// ------------------------------------------------------------------
+// Query templates (NOTE: use the existing `templates` table)
+// ------------------------------------------------------------------
+$where  = '';
 $params = [];
 $types  = '';
+
 if ($q !== '') {
-  $where = "WHERE title LIKE ? OR file_type LIKE ? OR file_path LIKE ?";
-  $like  = "%{$q}%";
-  $params = [$like, $like, $like];
-  $types  = 'sss';
+  // Search by template name or file path
+  $where  = "WHERE name LIKE ? OR file_path LIKE ?";
+  $like   = "%{$q}%";
+  $params = [$like, $like];
+  $types  = 'ss';
 }
 
-$sql = "SELECT id, title, file_path, COALESCE(file_type,'') AS file_type,
-               COALESCE(created_at, NOW()) AS created_at
-        FROM document_templates
-        $where
-        ORDER BY created_at DESC, id DESC";
+$sql = "
+  SELECT
+    id,
+    name AS title,                       -- normalize to `title` for UI
+    file_path,
+    ''   AS file_type,                   -- optional UI field; not stored
+    COALESCE(uploaded_at, NOW()) AS created_at
+  FROM templates
+  $where
+  ORDER BY uploaded_at DESC, id DESC
+";
 
 $stmt = $conn->prepare($sql);
 if ($where) { $stmt->bind_param($types, ...$params); }
 $stmt->execute();
 $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 
-// fund (static for now)
+// ------------------------------------------------------------------
+// (Optional) fund display — static demo number to match your other pages
+// ------------------------------------------------------------------
 $fundRemaining = "40,000";
 
-// helper: map extension to icon URL
-function icon_for($pathOrType) {
+// ------------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------------
+/**
+ * Choose an icon for a file based on extension.
+ * Replace external URLs with your own assets if preferred.
+ */
+function icon_for(string $pathOrType): string {
   $ext = strtolower(pathinfo($pathOrType, PATHINFO_EXTENSION) ?: $pathOrType);
-  if (in_array($ext, ['pdf'])) {
-    return 'https://upload.wikimedia.org/wikipedia/commons/8/87/PDF_file_icon.svg';
-  }
-  if (in_array($ext, ['doc','docx'])) {
-    return 'word.png'; // keep your local asset
-  }
-  if (in_array($ext, ['xls','xlsx'])) {
-    return 'https://upload.wikimedia.org/wikipedia/commons/7/73/Microsoft_Office_Excel_%282019–present%29.svg';
-  }
-  if (in_array($ext, ['ppt','pptx'])) {
-    return 'https://upload.wikimedia.org/wikipedia/commons/3/3b/Microsoft_Office_PowerPoint_%282019–present%29.svg';
-  }
+  if (in_array($ext, ['pdf'], true))     return 'https://upload.wikimedia.org/wikipedia/commons/8/87/PDF_file_icon.svg';
+  if (in_array($ext, ['doc','docx'], true)) return 'word.png'; // local asset (place in same folder or adjust path)
+  if (in_array($ext, ['xls','xlsx'], true)) return 'https://upload.wikimedia.org/wikipedia/commons/7/73/Microsoft_Office_Excel_%282019–present%29.svg';
+  if (in_array($ext, ['ppt','pptx'], true)) return 'https://upload.wikimedia.org/wikipedia/commons/3/3b/Microsoft_Office_PowerPoint_%282019–present%29.svg';
   // generic file icon
   return 'https://upload.wikimedia.org/wikipedia/commons/8/82/File_icon.svg';
 }
 
-// helper: link path (this page is /views/user/*.php)
-function link_path($rel) {
+/**
+ * Build a browser link for a stored relative path.
+ * This page lives at /views/user/*.php, so we walk up two levels to /.
+ */
+function link_path(?string $rel): string {
   if (!$rel) return '#';
   return '../../' . ltrim($rel, '/');
 }
@@ -70,10 +96,13 @@ function link_path($rel) {
       display: flex; font-family: Arial, sans-serif; height: 100vh;
       background: linear-gradient(to right, #4d2c3d, #3b4371, #00c6ff); color: #fff;
     }
-    .sidebar { width: 250px; background: #2e4b4f; padding: 20px 0; display: flex; flex-direction: column; align-items: center; }
+    .sidebar { width: 250px; background: #2e4b4f; padding: 20px 0;
+      display: flex; flex-direction: column; align-items: center; }
     .sidebar img.logo { width: 120px; margin-bottom: 10px; }
-    .sidebar .label { font-size: 13px; font-weight: bold; text-align: center; color: #dff2ff; text-shadow: 1px 1px 2px #000; margin-bottom: 25px; line-height: 1.3; }
-    .sidebar a { color: #fff; text-decoration: none; padding: 10px 15px; margin: 6px 0; border-radius: 8px; width: 90%; display: flex; align-items: center; gap: 10px; font-weight: bold; }
+    .sidebar .label { font-size: 13px; font-weight: bold; text-align: center;
+      color: #dff2ff; text-shadow: 1px 1px 2px #000; margin-bottom: 25px; line-height: 1.3; }
+    .sidebar a { color: #fff; text-decoration: none; padding: 10px 15px; margin: 6px 0;
+      border-radius: 8px; width: 90%; display: flex; align-items: center; gap: 10px; font-weight: bold; }
     .sidebar a.active { background-color: #2ec8b5; }
 
     .main { flex: 1; padding: 30px; overflow-y: auto; }
@@ -84,10 +113,12 @@ function link_path($rel) {
       padding: 10px 20px; display: flex; align-items: center; gap: 10px;
       width: 400px; color: #fff;
     }
-    .search-bar input { background: transparent; border: none; color: #fff; font-size: 16px; outline: none; width: 100%; }
+    .search-bar input { background: transparent; border: none; color: #fff;
+      font-size: 16px; outline: none; width: 100%; }
 
     .icons { display: flex; align-items: center; gap: 15px; font-size: 20px; }
-    .user-icon { width: 36px; height: 36px; border-radius: 50%; background: white; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #333; }
+    .user-icon { width: 36px; height: 36px; border-radius: 50%; background: white;
+      display: flex; align-items: center; justify-content: center; font-size: 18px; color: #333; }
 
     .fund-remaining { display: flex; justify-content: flex-end; margin: 12px 0 20px; }
     .fund-badge {
@@ -107,11 +138,13 @@ function link_path($rel) {
     }
     .file-card .title { display: flex; align-items: center; font-size: 14px; margin-right: 20px; }
     .file-card .title img { width: 20px; margin-right: 8px; }
-    .file-card .menu { position: absolute; top: 12px; right: 12px; font-weight: bold; cursor: pointer; color: #333; user-select: none; }
+    .file-card .menu { position: absolute; top: 12px; right: 12px; font-weight: bold;
+      cursor: pointer; color: #333; user-select: none; }
     .file-card .time { font-size: 12px; color: #333; text-align: right; font-weight: normal; margin-top: 8px; }
 
     /* tiny menu */
-    .pop { position:absolute; top:28px; right:8px; background:#fff; color:#000; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.2); padding:6px; display:none; z-index:5; }
+    .pop { position:absolute; top:28px; right:8px; background:#fff; color:#000; border-radius:8px;
+      box-shadow:0 6px 18px rgba(0,0,0,.2); padding:6px; display:none; z-index:5; }
     .pop a { display:block; text-decoration:none; color:#111; font-weight:600; font-size:12px; padding:6px 10px; border-radius:6px; }
     .pop a:hover { background:#f1f1f1; }
   </style>
@@ -120,12 +153,12 @@ function link_path($rel) {
 
   <!-- Sidebar -->
   <div class="sidebar">
-    <img src="sklogo.png" alt="SK Logo" class="logo" />
+    <img src="<?= htmlspecialchars(BASE_URL) ?>/assets/icons/sklogo.png" alt="SK Logo" class="logo" />
     <div class="label"></div>
-    <a href="admin_pov.php"> 📊 Dashboard</a>
-    <a href="proposals.php">📁 Proposals</a>
-    <a href="templates.php" class="active">📄 Document Templates</a>
-    <a href="reports.php">📑 Reports</a>
+    <a href="<?= htmlspecialchars(USER_URL, ENT_QUOTES, 'UTF-8') ?>/dashboard.php">📊 Dashboard</a>
+    <a href="<?= htmlspecialchars(USER_URL, ENT_QUOTES, 'UTF-8') ?>/proposals.php">📁 Proposals</a>
+    <a href="<?= htmlspecialchars(USER_URL, ENT_QUOTES, 'UTF-8') ?>/templates.php"  class="active">📄 Document Templates</a>
+    <a href="<?= htmlspecialchars(USER_URL, ENT_QUOTES, 'UTF-8') ?>/reports.php">📑 Reports</a>
   </div>
 
   <!-- Main Content -->
@@ -150,7 +183,7 @@ function link_path($rel) {
       <?php if (!$rows): ?>
         <div style="opacity:.9;">No templates found<?= $q ? " for “".htmlspecialchars($q,ENT_QUOTES)."”" : "" ?>.</div>
       <?php else: ?>
-        <?php foreach ($rows as $r): 
+        <?php foreach ($rows as $r):
           $title = $r['title'] ?: basename($r['file_path']);
           $icon  = icon_for($r['file_path'] ?: $r['file_type']);
           $href  = link_path($r['file_path']);

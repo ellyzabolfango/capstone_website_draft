@@ -1,247 +1,149 @@
 <?php
-// migrate.php — creates DB (if missing), runs migrations/*.sql, backfills simplified tables, seeds admin & settings
+/**
+ * migrate.php (Capstone Edition)
+ *
+ * - Ensures database exists
+ * - Executes SQL migrations in /migrations
+ * - Seeds default admin + settings row (idempotent)
+ *
+ *    All schema definitions (DDL) should stay in /migrations/*.sql
+ *    to avoid duplication or drift. This file is only for orchestration + seeding.
+ */
+
+declare(strict_types=1);
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
-$host = "localhost";
-$db = "sk_capstone_db";
-$user = "root";
-$pass = "";
+/* =========================
+|  0) CONFIGURATION
+|========================= */
+$DB_HOST = getenv('DB_HOST') ?: 'localhost';
+$DB_NAME = getenv('DB_NAME') ?: 'sk_capstone_db';
+$DB_USER = getenv('DB_USER') ?: 'root';
+$DB_PASS = getenv('DB_PASS') ?: '';
 
-// Admin seed (via PHP hash)
-$ADMIN_USERNAME = "admin";
-$ADMIN_EMAIL = "admin@example.com";
-$ADMIN_FULLNAME = "Administrator";
-$ADMIN_PASSWORD = "Admin123"; // will be hashed
+/** Default admin (password will be hashed) */
+$ADMIN_USERNAME  = getenv('ADMIN_USERNAME') ?: 'admin';
+$ADMIN_EMAIL     = getenv('ADMIN_EMAIL')    ?: 'admin@example.com';
+$ADMIN_FULLNAME  = getenv('ADMIN_FULLNAME') ?: 'Administrator';
+$ADMIN_PASSWORD  = getenv('ADMIN_PASSWORD') ?: 'Admin123';
 
-function line($msg)
-{
-  echo $msg . "<br>\n";
+/** Migrations directory (relative to this file) */
+$MIGRATIONS_DIR = __DIR__ . '/migrations';
+
+/* =========================
+|  Helpers (simple HTML output)
+|========================= */
+function out(string $msg): void {
+  echo htmlspecialchars($msg, ENT_QUOTES, 'UTF-8') . "<br>\n";
+}
+function section(string $title): void {
+  out(str_repeat('=', 60));
+  out($title);
+  out(str_repeat('=', 60));
+}
+function execMulti(mysqli $conn, string $sql): void {
+  if (trim($sql) === '') return;
+  $ok = $conn->multi_query($sql);
+  if (!$ok) throw new RuntimeException("multi_query failed: " . $conn->error);
+  while ($conn->more_results()) {
+    $conn->next_result();
+    if ($res = $conn->store_result()) $res->free();
+  }
+}
+function runSqlFiles(mysqli $conn, string $dir): int {
+  if (!is_dir($dir)) {
+    out("⚠️ No migrations directory found at: $dir (skipping)");
+    return 0;
+  }
+  $files = array_values(array_filter(scandir($dir), fn($f) => preg_match('/\.sql$/i', $f)));
+  natsort($files);
+  $count = 0;
+  foreach ($files as $f) {
+    $path = $dir . DIRECTORY_SEPARATOR . $f;
+    $sql  = @file_get_contents($path);
+    if (!$sql || trim($sql) === '') {
+      out("→ $f skipped (empty file)");
+      continue;
+    }
+    echo "→ Running $f ... ";
+    try {
+      execMulti($conn, $sql);
+      echo "✅<br>\n";
+      $count++;
+    } catch (Throwable $e) {
+      echo "❌ " . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . "<br>\n";
+    }
+  }
+  return $count;
 }
 
+/* =========================
+|  1) CONNECT / CREATE DB
+|========================= */
 try {
-  // 1) Ensure DB exists and select it
-  $conn = new mysqli($host, $user, $pass);
-  $conn->set_charset("utf8mb4");
-  $conn->query("CREATE DATABASE IF NOT EXISTS `$db` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
-  $conn->select_db($db);
-  line("✅ Database ensured and selected: $db");
+  section('Database Setup');
+  $conn = new mysqli($DB_HOST, $DB_USER, $DB_PASS);
+  $conn->set_charset('utf8mb4');
 
-  // 2) Disable FK checks during migration (restore in finally)
-  $fkDisabled = false;
+  $conn->query(sprintf(
+    "CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+    $conn->real_escape_string($DB_NAME)
+  ));
+  $conn->select_db($DB_NAME);
+  out("✅ Database ensured and selected: {$DB_NAME}");
+
+  /* =========================
+  |  2) TEMPORARILY DISABLE FKs
+  |========================= */
   try {
     $conn->query("SET FOREIGN_KEY_CHECKS=0");
-    $fkDisabled = true;
+    out("🧩 FOREIGN_KEY_CHECKS disabled during migration");
   } catch (Throwable $e) {
-    line("⚠️ Could not disable FOREIGN_KEY_CHECKS: " . htmlspecialchars($e->getMessage()));
+    out("⚠️ Could not disable FOREIGN_KEY_CHECKS: " . $e->getMessage());
   }
 
-  // 3) Run all .sql files (sorted)
-  $ran = 0;
-  $migDir = __DIR__ . '/migrations';
-  if (is_dir($migDir)) {
-    $files = array_values(array_filter(scandir($migDir), fn($f) => preg_match('/\.sql$/i', $f)));
-    sort($files, SORT_NATURAL);
-    foreach ($files as $f) {
-      $path = $migDir . DIRECTORY_SEPARATOR . $f;
-      $sql = @file_get_contents($path);
-      if (!$sql || !trim($sql)) {
-        line("→ $f skipped (empty)");
-        continue;
-      }
+  /* =========================
+  |  3) EXECUTE MIGRATION FILES
+  |========================= */
+  section('Running SQL Migrations');
+  $ranFiles = runSqlFiles($conn, $MIGRATIONS_DIR);
+  out("✔ SQL migration files executed: {$ranFiles}");
 
-      echo "→ Running $f ... ";
-      try {
-        if ($conn->multi_query($sql)) {
-          while ($conn->more_results() && $conn->next_result()) { /* flush */
-          }
-          echo "✅<br>";
-          $ran++;
-        } else {
-          echo "❌ " . htmlspecialchars($conn->error) . "<br>";
-        }
-      } catch (Throwable $e) {
-        echo "❌ " . htmlspecialchars($e->getMessage()) . "<br>";
-      }
-    }
-  } else {
-    line("⚠️ No /migrations folder found; skipping SQL files.");
-  }
-
-  // 4) Backfills (match the schemas)
-  //    Safe to run anytime because of IF NOT EXISTS.
-  $backfills = [
-    // 001_create_users.sql (unchanged)
-    'users' => <<<SQL
-CREATE TABLE IF NOT EXISTS users (
-   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  username VARCHAR(50) NOT NULL UNIQUE,
-  fullname VARCHAR(100) NOT NULL,
-  email VARCHAR(100) NOT NULL UNIQUE,
-  location VARCHAR(100) NOT NULL,
-  position VARCHAR(100) NOT NULL,
-  role ENUM('admin','user') NOT NULL DEFAULT 'user',
-  password VARCHAR(255) NOT NULL,
-  is_active TINYINT(1) NOT NULL DEFAULT 1,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-SQL,
-    // 002_create_proposals.sql (SIMPLE: single budget; optional ppa_ref & fiscal_year)
-    'proposals' => <<<SQL
-CREATE TABLE IF NOT EXISTS proposals (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-
-  title VARCHAR(150) NOT NULL,
-  description TEXT NOT NULL,
-  attachment_path VARCHAR(255) NULL,
-
-  source VARCHAR(100) NULL,
-  ppa_ref VARCHAR(100) NULL,
-  fiscal_year YEAR NULL,
-
-  budget DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-  status ENUM('Pending','Approved','Rejected','Completed') NOT NULL DEFAULT 'Pending',
-
-  submitted_by INT UNSIGNED NULL,
-  approved_by  INT UNSIGNED NULL,
-
-  submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at   TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
-
-  INDEX idx_status (status),
-  INDEX idx_fiscal (fiscal_year),
-
-  CONSTRAINT fk_proposals_submitter FOREIGN KEY (submitted_by)
-    REFERENCES users(id) ON DELETE SET NULL,
-  CONSTRAINT fk_proposals_approver FOREIGN KEY (approved_by)
-    REFERENCES users(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-SQL,
-    // 003_create_activities.sql (SIMPLE)
-    'activities' => <<<SQL
-CREATE TABLE IF NOT EXISTS activities (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  proposal_id INT UNSIGNED NOT NULL,
-
-  activity_name VARCHAR(150) NOT NULL,
-  description TEXT NULL,
-
-  start_date DATE NULL,
-  end_date DATE NULL,
-
-  status ENUM('Not Started','Ongoing','Completed') NOT NULL DEFAULT 'Not Started',
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-  INDEX idx_proposal (proposal_id),
-
-  CONSTRAINT fk_activities_proposal FOREIGN KEY (proposal_id)
-    REFERENCES proposals(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-SQL,
-    // 004_create_templates.sql (SIMPLE)
-    'templates' => <<<SQL
-CREATE TABLE IF NOT EXISTS templates (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(150) NOT NULL,
-  file_path VARCHAR(255) NOT NULL,
-
-  uploaded_by INT UNSIGNED NULL,
-  uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-  INDEX idx_uploader (uploaded_by),
-
-  CONSTRAINT fk_templates_user FOREIGN KEY (uploaded_by)
-    REFERENCES users(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-SQL,
-    // 005_create_reports.sql (SIMPLE)
-    'reports' => <<<SQL
-CREATE TABLE IF NOT EXISTS reports (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-
-  proposal_id INT UNSIGNED NULL,
-  report_type VARCHAR(50) NOT NULL,
-  title VARCHAR(150) NOT NULL,
-  file_path VARCHAR(255) NOT NULL,
-
-  generated_by INT UNSIGNED NULL,
-  generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-  INDEX idx_type (report_type),
-  INDEX idx_proposal (proposal_id),
-
-  CONSTRAINT fk_reports_proposal FOREIGN KEY (proposal_id)
-    REFERENCES proposals(id) ON DELETE CASCADE,
-  CONSTRAINT fk_reports_user FOREIGN KEY (generated_by)
-    REFERENCES users(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-SQL,
-    // 006_create_settings.sql (optional; seed handled below)
-    'settings' => <<<SQL
-CREATE TABLE IF NOT EXISTS settings (
-  id TINYINT UNSIGNED PRIMARY KEY,
-  total_budget DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-  fiscal_year YEAR NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-SQL,
-  ];
-
-  $conn->begin_transaction();
+  /* =========================
+  |  4) SEED DEFAULT ADMIN
+  |========================= */
+  section('Seeding Admin');
   try {
-    foreach ($backfills as $table => $ddl) {
-      $conn->query($ddl);
-      line("✅ Ensured table: $table");
-    }
-    $conn->commit();
-  } catch (Throwable $e) {
-    $conn->rollback();
-    line("❌ Backfill transaction failed: " . htmlspecialchars($e->getMessage()));
-  }
-
-  // 5) Seed admin (idempotent)
-  try {
-    $stmt = $conn->prepare("SELECT id FROM users WHERE username=? OR email=? LIMIT 1");
+    $stmt = $conn->prepare("SELECT id FROM users WHERE username = ? OR email = ? LIMIT 1");
     $stmt->bind_param("ss", $ADMIN_USERNAME, $ADMIN_EMAIL);
     $stmt->execute();
     $exists = $stmt->get_result()->num_rows > 0;
 
     if ($exists) {
-      line("👤 Admin already exists — seed skipped");
+      out("👤 Admin already exists — seed skipped");
     } else {
       $hash = password_hash($ADMIN_PASSWORD, PASSWORD_DEFAULT);
-      $stmt = $conn->prepare("INSERT INTO users (username, fullname, email, role, password, is_active)
-                              VALUES (?, ?, ?, 'admin', ?, 1)");
+      $stmt = $conn->prepare(
+        "INSERT INTO users (username, fullname, email, role, password, is_active, barangay, position)
+         VALUES (?, ?, ?, 'admin', ?, 1, 'Calbayog City', 'SK Federation')"
+      );
       $stmt->bind_param("ssss", $ADMIN_USERNAME, $ADMIN_FULLNAME, $ADMIN_EMAIL, $hash);
       $stmt->execute();
-      line("👤 Seeded default admin ($ADMIN_USERNAME / $ADMIN_PASSWORD)");
+      out("👤 Seeded default admin (username: {$ADMIN_USERNAME} / password: {$ADMIN_PASSWORD})");
     }
   } catch (Throwable $e) {
-    line("⚠️ Admin seed error: " . htmlspecialchars($e->getMessage()));
+    out("⚠️ Admin seed error: " . $e->getMessage());
   }
 
-  // 6) Seed settings row if empty
-  try {
-    if ($conn->query("SHOW TABLES LIKE 'settings'")->num_rows) {
-      $row = $conn->query("SELECT COUNT(*) c FROM settings")->fetch_assoc();
-      if ((int) $row['c'] === 0) {
-        $conn->query("INSERT INTO settings (id, total_budget, fiscal_year) VALUES (1, 0.00, YEAR(CURDATE()))");
-        line("⚙️ Seeded settings (total_budget=0.00)");
-      } else {
-        line("⚙️ Settings already present — seed skipped");
-      }
-    } else {
-      line("⚠️ 'settings' table not found (skipped seed)");
-    }
-  } catch (Throwable $e) {
-    line("⚠️ Settings seed error: " . htmlspecialchars($e->getMessage()));
-  }
-
+} catch (Throwable $fatal) {
+  section('FATAL ERROR');
+  out('❌ ' . $fatal->getMessage());
 } finally {
-  try {
-    $conn?->query("SET FOREIGN_KEY_CHECKS=1");
-  } catch (Throwable $e) { /* noop */
+  if (isset($conn) && $conn instanceof mysqli) {
+    try { $conn->query("SET FOREIGN_KEY_CHECKS=1"); } catch (Throwable $e) { /* ignore */ }
+    $conn->close();
   }
-  $conn?->close();
 }
 
-echo "<br>✅ Migration complete.";
+out('');
+out("✅ Migration complete (capstone schema).");

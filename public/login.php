@@ -1,60 +1,32 @@
 <?php
-// ---------------------------
-// LOGIN PAGE
-// ---------------------------
-
-// Start or resume the session (used to track logged-in user)
+// -----------
+// LOGIN PAGE 
+// -----------
+declare(strict_types=1);
 session_start();
 
-// loads DB, CSRF, auth, constants
 require_once __DIR__ . '/../bootstrap.php'; 
 
-// Variable to hold error message (if login fails)
 $login_error = '';
 
-// Check if the login form was submitted (via POST method)
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    // ⚠️ Add CSRF protection
+    if (!csrf_check($_POST['csrf_token'] ?? null)) {
+        $login_error = "Invalid request (CSRF). Please refresh the page.";
+    } else {
+        $username = trim($_POST['username'] ?? '');
+        $passwordInput = $_POST['password'] ?? '';
 
-  // Get the input values from the form
-  $username = trim($_POST['username'] ?? '');   // username entered
-  $passwordInput = $_POST['password'] ?? '';    // password entered
+        // ✅ Reuse auth_login() helper (less duplicate logic)
+        [$ok, $err] = auth_login($username, $passwordInput);
 
-  // Look for the user in the database by username
-  $stmt = db()->prepare("SELECT id, username, password, role, is_active FROM users WHERE username = ?");
-  $stmt->bind_param("s", $username);
-  $stmt->execute();
-  $result = $stmt->get_result();
-
-  // If a user record is found
-  if ($result->num_rows === 1) {
-    $user = $result->fetch_assoc();
-
-    // Check if the account is active
-    if ((int) $user['is_active'] !== 1) {
-      $login_error = "Account is inactive.";  // message if user is blocked
+        if ($ok) {
+            // ✅ Redirect by role (admin → dashboard, user → dashboard)
+            redirect_by_role();
+        } else {
+            $login_error = $err ?? "Invalid username or password.";
+        }
     }
-    // Verify the password entered matches the hashed password in the DB
-    elseif (password_verify($passwordInput, $user['password'])) {
-
-      // ✅ Login success
-      session_regenerate_id(true); // creates a new session ID (extra security)
-      $_SESSION['user_id'] = $user['id'];       // store user id
-      $_SESSION['username'] = $user['username']; // store username
-      $_SESSION['role'] = $user['role'];     // store role (admin/user)
-
-      // Redirect to homepage (can adjust to dashboard later)
-      header("Location: index.php");
-      exit;
-    }
-    // Wrong password
-    else {
-      $login_error = "Invalid username or password.";
-    }
-  }
-  // No user found with that username
-  else {
-    $login_error = "Invalid username or password.";
-  }
 }
 ?>
 
@@ -169,26 +141,19 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
 <body>
   <div class="container">
-    <!-- Login Title -->
     <div class="login-title">Login</div>
-
-    <!-- Login Form -->
     <form class="login-box" method="POST" action="">
-      <!-- Logo -->
-      <img src= "<?= htmlspecialchars(BASE_URL) ?>/assets/icons/sklogo.png" alt="Logo" class="logo" />
+      <img src="<?= htmlspecialchars(BASE_URL) ?>/assets/icons/sklogo.png" alt="Logo" class="logo" />
 
-      <!-- Error message if login fails -->
+      <!-- Embed CSRF token -->
+      <?= csrf_field() ?>
+
       <?php if (!empty($login_error)): ?>
         <div class="error-message"><?= htmlspecialchars($login_error) ?></div>
       <?php endif; ?>
 
-      <!-- Username field -->
       <input type="text" name="username" placeholder="Username" class="input" required />
-
-      <!-- Password field -->
       <input type="password" name="password" placeholder="Password" class="input" required />
-
-      <!-- Submit button -->
       <button type="submit" class="sign-in-button">Sign in</button>
     </form>
   </div>
